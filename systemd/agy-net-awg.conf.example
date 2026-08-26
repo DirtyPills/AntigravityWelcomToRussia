@@ -1,5 +1,5 @@
 # Install as /etc/systemd/system/agy-net.service.d/awg.conf.
-# Creates awg0 only inside namespace agy-net. The already connected amn0
-# remains the host-side bootstrap transport for the encrypted AWG handshake.
+# Creates awg0 only inside namespace agy-net. Only the AWG UDP handshake uses
+# the host's current default route; all other namespace traffic uses awg0.
 [Service]
 Environment=AGY_NET_TUNNEL_MODE=awg

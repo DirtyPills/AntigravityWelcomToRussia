@@ -218,10 +218,26 @@ def recorded_tunnel_mode() -> str:
     return validate_tunnel_mode(value)
 
 
-def selected_transport(r: Runner, requested: str | None) -> str:
+def default_route_transport(r: Runner) -> str:
+    if r.dry_run:
+        print("PLAN read the host default route interface for AWG bootstrap")
+        return "default-route"
+    result = r.run(["ip", "route", "show", "default"], capture=True)
+    for line in result.stdout.splitlines():
+        match = re.search(r"(?:^|\s)dev\s+(\S+)", line)
+        if match:
+            return validate_transport_interface(match.group(1))
+    raise AgyError("AWG bootstrap needs a host default route interface; specify --transport-interface explicitly")
+
+
+def selected_transport(r: Runner, requested: str | None, tunnel_mode: str) -> str:
     if requested:
         return validate_transport_interface(requested)
-    return recorded_transport() if ns_exists(r) else DEFAULT_TRANSPORT_IF
+    if ns_exists(r):
+        return recorded_transport()
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        return default_route_transport(r)
+    return DEFAULT_TRANSPORT_IF
 
 
 def selected_tunnel_mode(r: Runner, requested: str | None) -> str:
@@ -931,8 +947,8 @@ def main() -> int:
     args = parser.parse_args(); r = Runner(args.dry_run, args.debug)
     try:
         config = profile_config(args.profile, args.config)
-        transport = selected_transport(r, args.transport_interface)
         tunnel_mode = selected_tunnel_mode(r, args.tunnel_mode)
+        transport = selected_transport(r, args.transport_interface, tunnel_mode)
         dns_override = parse_dns_override(args.dns) if args.action in {"start", "restart", "doctor"} else None
         if args.action == "start":
             if not args.dry_run:

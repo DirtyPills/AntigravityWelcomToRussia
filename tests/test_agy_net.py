@@ -68,6 +68,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(agy.AgyError):
             agy.validate_tunnel_mode("other")
 
+    def test_awg_mode_uses_the_host_default_route_for_bootstrap(self):
+        runner = mock.Mock(dry_run=False)
+        runner.run.return_value = subprocess.CompletedProcess([], 0, "default via 192.0.2.1 dev enp6s0\n", "")
+        with mock.patch.object(agy, "ns_exists", return_value=False):
+            self.assertEqual(agy.selected_transport(runner, None, "awg"), "enp6s0")
+
     def test_transport_interface_name_is_strictly_validated(self):
         self.assertEqual(agy.validate_transport_interface("tun0"), "tun0")
         with self.assertRaises(agy.AgyError):
