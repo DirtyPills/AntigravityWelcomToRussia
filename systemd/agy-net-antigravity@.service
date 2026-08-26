@@ -1,0 +1,19 @@
+[Unit]
+Description=Antigravity for %i inside the agy-net network namespace
+Requires=agy-net.service
+BindsTo=agy-net.service
+After=agy-net.service
+ConditionPathExists=/run/netns/agy-net
+ConditionPathExists=/run/agy-net/resolv.conf
+ConditionPathExists=/etc/agy-net/desktop.json
+
+[Service]
+Type=exec
+User=%i
+Group=%i
+UMask=0077
+NetworkNamespacePath=/run/netns/agy-net
+BindReadOnlyPaths=/run/agy-net/resolv.conf:/etc/resolv.conf
+ExecStartPre=/usr/local/lib/agy-net/desktop-exec --user %i --validate
+ExecStart=/usr/local/lib/agy-net/desktop-exec --user %i
+KillMode=control-group

@@ -1,0 +1,29 @@
+# Private VPN and DNS configuration. Never commit real keys or endpoints.
+*.conf
+dns.yaml
+*.key
+*.pem
+*.p12
+*.pfx
+*.token
+.env
+.env.*
+!.env.example
+
+# Runtime artefacts and logs.
+*.log
+logs/
+run/
+tmp/
+
+# Python build and test artefacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local editor and OS metadata.
+.vscode/
+.idea/
+.DS_Store

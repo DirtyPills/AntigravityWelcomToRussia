@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Antigravity (agy-net)
+Comment=Запуск Antigravity в изолированной сети AmneziaVPN
+TryExec=/bin/sh
+Exec=/bin/sh -c "/usr/bin/systemctl is-active --quiet agy-net-antigravity@\$(/usr/bin/id -un).service || exec /usr/bin/pkexec /usr/bin/systemctl start agy-net-antigravity@\$(/usr/bin/id -un).service"
+Icon=applications-development
+Terminal=false
+Categories=Development;
+StartupNotify=true

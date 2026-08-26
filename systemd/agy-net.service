@@ -1,0 +1,13 @@
+[Unit]
+Description=Antigravity network namespace over the active AmneziaVPN transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/agy-net --config /etc/agy-net/awg0.conf start
+ExecStop=/usr/local/bin/agy-net --config /etc/agy-net/awg0.conf stop
+
+[Install]
+WantedBy=multi-user.target

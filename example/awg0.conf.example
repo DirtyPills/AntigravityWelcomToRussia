@@ -1,0 +1,27 @@
+# Шаблон, а не рабочая конфигурация.
+# Замените ВСЕ значения-заглушки данными своего провайдера и сохраните
+# рабочий файл вне Git, например как ./awg0.conf с правами 0600.
+
+[Interface]
+PrivateKey = REPLACE_WITH_CLIENT_PRIVATE_KEY
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
+MTU = 1280
+Jc = 4
+Jmin = 40
+Jmax = 70
+S1 = 96
+S2 = 115
+S3 = 64
+S4 = 82
+H1 = 123456789
+H2 = 987654321
+H3 = 182736451
+H4 = 564738291
+
+[Peer]
+PublicKey = REPLACE_WITH_SERVER_PUBLIC_KEY
+PresharedKey = REPLACE_WITH_PRESHARED_KEY_IF_USED
+Endpoint = 198.51.100.10:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25

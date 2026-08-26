@@ -1,0 +1,7 @@
+dns:
+  mode: split
+  default:
+    - 1.1.1.1
+  routes:
+    example.com:
+      - 1.1.1.1
