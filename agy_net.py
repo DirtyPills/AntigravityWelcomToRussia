@@ -192,6 +192,8 @@ def recorded_transport() -> str:
         value = TRANSPORT_FILE.read_text(encoding="ascii").strip()
     except FileNotFoundError:
         return DEFAULT_TRANSPORT_IF
+    except PermissionError as exc:
+        raise AgyError("reading the active transport requires root; run: sudo agy-net status") from exc
     return validate_transport_interface(value)
 
 

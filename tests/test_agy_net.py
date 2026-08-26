@@ -4,6 +4,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location("agy_net", Path(__file__).parents[1] / "agy_net.py")
@@ -55,6 +56,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(agy.parse_dns_override("1.1.1.1, 1.0.0.1"), ["1.1.1.1", "1.0.0.1"])
         with self.assertRaises(agy.AgyError):
             agy.parse_dns_override("not-a-dns-server")
+
+    def test_root_only_runtime_transport_is_reported_without_traceback(self):
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError):
+            with self.assertRaisesRegex(agy.AgyError, "requires root"):
+                agy.recorded_transport()
 
     def test_dns_servers_are_validated(self):
         path = self.config(); self.addCleanup(path.unlink)
