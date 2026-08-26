@@ -52,12 +52,21 @@ Antigravity и дочерние процессы (обычный пользов�
 
 Скрипт только проверяет `net.ipv4.ip_forward`; он никогда не изменяет sysctl самостоятельно.
 
+Если проверка показывает `0`, включите forwarding явно и постоянно до запуска `agy-net`:
+
+```sh
+sudo install -Dm 0644 sysctl/90-agy-net.conf.example /etc/sysctl.d/90-agy-net.conf
+sudo sysctl --system
+```
+
 ## Быстрый старт: AmneziaVPN
 
 ```sh
 git clone https://github.com/DirtyPills/AntigravityWelcomToRussia.git
 cd AntigravityWelcomToRussia
 sudo ./install.sh
+sudo install -Dm 0644 sysctl/90-agy-net.conf.example /etc/sysctl.d/90-agy-net.conf
+sudo sysctl --system
 
 cp example/awg0.conf.example ./awg0.conf
 chmod 600 ./awg0.conf

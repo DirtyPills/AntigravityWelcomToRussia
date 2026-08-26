@@ -1,0 +1,3 @@
+# Required for forwarding only the agy-net veth subnet through its selected
+# transport. agy-net itself never changes this setting automatically.
+net.ipv4.ip_forward = 1
