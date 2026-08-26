@@ -58,6 +58,12 @@ sudo --preserve-env=DISPLAY,WAYLAND_DISPLAY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADD
 
 Затем допустимы ярлык `desktop/agy-net-antigravity.desktop` или `sudo ... agy-net run /абсолютный/путь/к/antigravity-ide`. После запуска проверь, что основной PID Antigravity находится в `agy-net`, но не завершай пользовательский экземпляр без явного разрешения.
 
+### Не открывается браузер в Linux Mint / XFCE
+
+Симптом: при первом входе Antigravity показывает `Failed to execute default Web Browser` / `Input/output error`. Это проблема вызова XFCE `exo-open` из systemd-сервиса, не VPN и не network namespace.
+
+В `desktop-configure` должны сохраняться `XDG_CURRENT_DESKTOP=X-Generic` и путь к найденному Firefox/Chrome/Chromium. После обновления обязательно повтори `sudo ./install.sh`, затем из активной графической сессии повтори `desktop-configure` и перезапусти только `agy-net-antigravity@<пользователь>.service`. Не меняй обработчик браузера всего рабочего стола, VPN, TUN-интерфейсы или маршруты хоста.
+
 ## Проверка изменений
 
 Для изменений кода обязательно выполни:

@@ -604,6 +604,15 @@ def user_environment(account: pwd.struct_passwd) -> dict[str, str]:
     return environment
 
 
+def browser_environment(environment: dict[str, str]) -> None:
+    """Avoid XFCE exo-open failures when Electron opens the browser from a systemd unit."""
+    environment["XDG_CURRENT_DESKTOP"] = "X-Generic"
+    for browser in ("firefox", "google-chrome", "chromium", "brave-browser"):
+        if path := shutil.which(browser):
+            environment["BROWSER"] = path
+            return
+
+
 def resolve_launcher_command(command: list[str], account: pwd.struct_passwd) -> list[str]:
     if not command:
         raise AgyError("usage: agy-net run <command> [args...]")
@@ -866,6 +875,7 @@ def configure_desktop(binary: Path, dry_run: bool = False) -> None:
     if not stat.S_ISREG(info.st_mode) or not os.access(binary, os.X_OK):
         raise AgyError(f"Antigravity binary is not executable: {binary}")
     environment = user_environment(account)
+    browser_environment(environment)
     if not environment.get("DISPLAY") and not environment.get("WAYLAND_DISPLAY"):
         raise AgyError("desktop-configure needs DISPLAY or WAYLAND_DISPLAY from the active desktop session")
     # Environment comes from the desktop session, never from an untrusted .desktop argument.

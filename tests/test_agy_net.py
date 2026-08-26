@@ -115,6 +115,16 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("BindReadOnlyPaths=/run/agy-net/resolv.conf:/etc/resolv.conf", unit)
         self.assertIn("ExecStartPre=/usr/local/lib/agy-net/desktop-exec --user %i --validate", unit)
 
+    def test_desktop_launcher_uses_a_generic_browser_handler_outside_xfce_exo_open(self):
+        environment = {"HOME": "/home/test"}
+        with mock.patch.object(agy.shutil, "which", side_effect=lambda name: "/usr/bin/firefox" if name == "firefox" else None):
+            agy.browser_environment(environment)
+        self.assertEqual(environment["XDG_CURRENT_DESKTOP"], "X-Generic")
+        self.assertEqual(environment["BROWSER"], "/usr/bin/firefox")
+        helper = (Path(__file__).parents[1] / "desktop_exec.py").read_text()
+        self.assertIn('"BROWSER"', helper)
+        self.assertIn('"XDG_CURRENT_DESKTOP"', helper)
+
     def test_desktop_helper_refuses_root_service_user(self):
         helper = Path(__file__).parents[1] / "desktop_exec.py"
         result = subprocess.run(["python3", str(helper), "--user", "root", "--validate"], text=True, capture_output=True)
