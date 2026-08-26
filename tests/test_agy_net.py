@@ -47,6 +47,27 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn('oifname "amn0"', rules)
         self.assertIn('iifname "agy-host0" drop', rules)
 
+    def test_managed_awg_rules_permit_only_the_numeric_udp_endpoint_over_the_host_transport(self):
+        host_rules = agy.host_nft_script("amn0", "198.51.100.7", 51820)
+        namespace_rules = agy.nft_script("198.51.100.7", 51820)
+        self.assertIn('ip daddr 198.51.100.7 udp dport 51820', host_rules)
+        self.assertIn('oifname "awg0" accept', namespace_rules)
+        self.assertIn('oifname "agy-net0" ip daddr 198.51.100.7 udp dport 51820 accept', namespace_rules)
+        self.assertNotIn('iifname "agy-host0" oifname "amn0" accept', host_rules)
+
+    def test_awg_runtime_config_removes_only_interface_dns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "awg0.conf"
+            config.write_text("[Interface]\nPrivateKey = secret\nDNS = 1.1.1.1\nAddress = 10.0.0.2/32\n[Peer]\nDNS = not-a-resolver\nPublicKey = public\n")
+            self.assertNotIn("DNS = 1.1.1.1", agy.awg_config_without_dns(config))
+            self.assertIn("DNS = not-a-resolver", agy.awg_config_without_dns(config))
+
+    def test_tunnel_mode_is_strictly_validated(self):
+        self.assertEqual(agy.validate_tunnel_mode("awg"), "awg")
+        self.assertEqual(agy.validate_tunnel_mode("reuse"), "reuse")
+        with self.assertRaises(agy.AgyError):
+            agy.validate_tunnel_mode("other")
+
     def test_transport_interface_name_is_strictly_validated(self):
         self.assertEqual(agy.validate_transport_interface("tun0"), "tun0")
         with self.assertRaises(agy.AgyError):

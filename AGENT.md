@@ -2,17 +2,17 @@
 
 ## Назначение проекта
 
-`agy-net` изолирует Antigravity в Linux network namespace и разрешает ему сеть только через уже существующий транспорт: AmneziaVPN `amn0` или VLESS-клиент в TUN-режиме. Это не VPN-клиент, не менеджер VLESS-ссылок и не средство изменения маршрутов хоста.
+`agy-net` изолирует Antigravity в Linux network namespace. Он может повторно использовать AmneziaVPN `amn0`/VLESS TUN или создать отдельный AmneziaWG `awg0` исключительно внутри namespace; существующие маршруты хоста от этого не меняются. Это не менеджер VLESS-ссылок и не средство изменения маршрутов хоста.
 
 ## Критические инварианты
 
-1. Никогда не создавай, не останавливай, не перенастраивай и не перемещай существующие VPN/TUN-интерфейсы, Wi-Fi или маршруты хоста.
-2. Управляй только namespace `agy-net`, veth `agy-host0`/`agy-net0`, файлами `/run/agy-net` и nftables-таблицами `ip agy_net`/`inet agy_net`.
+1. Никогда не останавливай, не перенастраивай и не перемещай существующие VPN/TUN-интерфейсы, Wi-Fi или маршруты хоста.
+2. Управляй только namespace `agy-net`, veth `agy-host0`/`agy-net0`, файлами `/run/agy-net` и nftables-таблицами `ip agy_net`/`inet agy_net`. Режим `awg` дополнительно создаёт `awg0` только внутри namespace.
 3. Не читай вслух, не записывай в репозиторий и не выводи содержимое реальных `awg0.conf`, VLESS-ссылок, private/preshared keys, токенов, cookies или журналов.
 4. Не ослабляй kill switch: из `agy-host0` разрешён только выбранный транспорт; весь иной выход должен оставаться `DROP`.
 5. Не запускай сетевые тесты, `start`, `stop` или `restart` без явного разрешения владельца машины: они меняют только `agy-net`, но могут закрыть приложения внутри namespace.
 
-## Установка: AmneziaVPN
+## Установка: отдельный AmneziaWG внутри namespace
 
 ```sh
 sudo ./install.sh
@@ -20,13 +20,15 @@ cp example/awg0.conf.example ./awg0.conf
 chmod 600 ./awg0.conf
 # Пользователь самостоятельно заполняет рабочую конфигурацию.
 sudo agy-net configure ./awg0.conf
-sudo agy-net doctor
-sudo agy-net start
+sudo install -Dm 0644 systemd/agy-net-awg.conf.example \
+  /etc/systemd/system/agy-net.service.d/awg.conf
+sudo systemctl daemon-reload
+sudo systemctl start agy-net.service
 ```
 
-Перед `start` убедись только командами чтения, что `amn0` существует, включён `net.ipv4.ip_forward`, а других тоннелей и маршрутов проект не затронет. Если forwarding выключен, изменяй его только с явного разрешения владельца через `sysctl/90-agy-net.conf.example`; не меняй другие sysctl-параметры.
+Перед `start` убедись только командами чтения, что `amn0` существует, включён `net.ipv4.ip_forward`, а других тоннелей и маршрутов проект не затронет. В режиме `awg` `amn0` используется только для UDP handshake; все другие пакеты из veth блокируются. Если forwarding выключен, изменяй его только с явного разрешения владельца через `sysctl/90-agy-net.conf.example`; не меняй другие sysctl-параметры.
 
-Если AWG-конфиг нельзя переносить на машину, но `amn0` уже подключён, используй `systemd/agy-net-amnezia-dns.conf.example` как drop-in `dns.conf`. Он задаёт только DNS namespace и не читает секреты AWG.
+Если AWG-конфиг нельзя переносить на машину, но `amn0` уже подключён, используй `systemd/agy-net-amnezia-dns.conf.example` как drop-in `dns.conf`. Он включает режим повторного использования, задаёт только DNS namespace и не читает секреты AWG.
 
 ## Установка: VLESS TUN
 

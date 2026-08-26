@@ -28,9 +28,12 @@ CONF = Path("/etc/agy-net/awg0.conf")
 RUNTIME = Path("/run/agy-net")
 OWNERSHIP = RUNTIME / "managed"
 TRANSPORT_FILE = RUNTIME / "transport"
+MODE_FILE = RUNTIME / "tunnel-mode"
 RESOLV_CONF = RUNTIME / "resolv.conf"
 DNSMASQ_CONF = RUNTIME / "dnsmasq.conf"
 DNSMASQ_PID = RUNTIME / "dnsmasq.pid"
+AWG_IF = "awg0"
+AWG_RUNTIME_CONF = RUNTIME / f"{AWG_IF}.conf"
 LOG_DIR = Path("/var/log/agy-net")
 LOG_FILE = LOG_DIR / "agy-net.log"
 CONFIG_DIR = Path("/etc/agy-net")
@@ -38,6 +41,8 @@ PROFILES_DIR = CONFIG_DIR / "profiles"
 DESKTOP_CONFIG = CONFIG_DIR / "desktop.json"
 TABLE = "agy_net"
 CHECK_URL = "https://api.ipify.org"
+TUNNEL_MODE_REUSE = "reuse"
+TUNNEL_MODE_AWG = "awg"
 
 
 class AgyError(RuntimeError):
@@ -187,6 +192,12 @@ def validate_transport_interface(name: str) -> str:
     return name
 
 
+def validate_tunnel_mode(value: str) -> str:
+    if value not in {TUNNEL_MODE_REUSE, TUNNEL_MODE_AWG}:
+        raise AgyError("tunnel mode must be reuse or awg")
+    return value
+
+
 def recorded_transport() -> str:
     try:
         value = TRANSPORT_FILE.read_text(encoding="ascii").strip()
@@ -197,10 +208,26 @@ def recorded_transport() -> str:
     return validate_transport_interface(value)
 
 
+def recorded_tunnel_mode() -> str:
+    try:
+        value = MODE_FILE.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return TUNNEL_MODE_REUSE
+    except PermissionError as exc:
+        raise AgyError("reading the active tunnel mode requires root; run: sudo agy-net status") from exc
+    return validate_tunnel_mode(value)
+
+
 def selected_transport(r: Runner, requested: str | None) -> str:
     if requested:
         return validate_transport_interface(requested)
     return recorded_transport() if ns_exists(r) else DEFAULT_TRANSPORT_IF
+
+
+def selected_tunnel_mode(r: Runner, requested: str | None) -> str:
+    if requested:
+        return validate_tunnel_mode(requested)
+    return recorded_tunnel_mode() if ns_exists(r) else TUNNEL_MODE_REUSE
 
 
 def dns_settings(config: Path) -> tuple[str, list[str], dict[str, list[str]]]:
@@ -277,6 +304,42 @@ def write_resolv_conf(mode: str, servers: list[str]) -> None:
     write_runtime_file(RESOLV_CONF, content, 0o644)
 
 
+def awg_config_without_dns(path: Path) -> str:
+    """Keep the AWG config private while preventing awg-quick from changing host DNS."""
+    section = ""
+    filtered: list[str] = []
+    for raw in path.read_text(encoding="ascii").splitlines(keepends=True):
+        value = raw.split("#", 1)[0].strip()
+        if value.startswith("[") and value.endswith("]"):
+            section = value[1:-1].strip().lower()
+        if section == "interface" and re.match(r"\s*DNS\s*=", raw, re.IGNORECASE):
+            continue
+        filtered.append(raw)
+    return "".join(filtered)
+
+
+def prepare_awg_runtime_config(path: Path) -> None:
+    write_runtime_file(AWG_RUNTIME_CONF, awg_config_without_dns(path), 0o600)
+
+
+def start_awg(r: Runner, config: Path) -> None:
+    if r.dry_run:
+        print(f"PLAN write private {AWG_RUNTIME_CONF} without DNS, mode 0600")
+        print(f"PLAN ip netns exec {NS} awg-quick up {AWG_RUNTIME_CONF}")
+        return
+    prepare_awg_runtime_config(config)
+    r.run(["ip", "netns", "exec", NS, "awg-quick", "up", str(AWG_RUNTIME_CONF)])
+
+
+def stop_awg(r: Runner) -> None:
+    if not iface_exists(r, AWG_IF, NS):
+        return
+    if r.dry_run:
+        print(f"PLAN ip netns exec {NS} awg-quick down {AWG_RUNTIME_CONF}")
+        return
+    r.run(["ip", "netns", "exec", NS, "awg-quick", "down", str(AWG_RUNTIME_CONF)], check=False, capture=True)
+
+
 def start_dnsmasq(defaults: list[str], routes: dict[str, list[str]]) -> None:
     if not shutil.which("dnsmasq"):
         raise AgyError("split DNS requires dnsmasq; install package dnsmasq")
@@ -320,28 +383,39 @@ def stop_dnsmasq() -> None:
     DNSMASQ_CONF.unlink(missing_ok=True)
 
 
-def nft_script() -> str:
+def nft_script(endpoint: str | None = None, port: int | None = None) -> str:
+    if endpoint is not None and port is not None:
+        permitted_egress = f"""  oifname \"{AWG_IF}\" accept
+  oifname \"{NET_IF}\" ip daddr {endpoint} udp dport {port} accept"""
+    else:
+        permitted_egress = f"  oifname \"{NET_IF}\" accept"
     return f"""table inet {TABLE} {{
  chain output {{
   type filter hook output priority filter; policy drop;
   oifname \"lo\" accept
   ct state established,related accept
-  oifname \"{NET_IF}\" accept
+{permitted_egress}
  }}
 }}\n"""
 
 
-def host_nft_script(transport: str = DEFAULT_TRANSPORT_IF) -> str:
+def host_nft_script(transport: str = DEFAULT_TRANSPORT_IF, endpoint: str | None = None, port: int | None = None) -> str:
+    if endpoint is not None and port is not None:
+        forward_rule = f"iifname \"{HOST_IF}\" oifname \"{transport}\" ip daddr {endpoint} udp dport {port} accept"
+        nat_rule = f"oifname \"{transport}\" ip saddr 10.200.200.0/30 ip daddr {endpoint} udp dport {port} masquerade"
+    else:
+        forward_rule = f"iifname \"{HOST_IF}\" oifname \"{transport}\" accept"
+        nat_rule = f"oifname \"{transport}\" ip saddr 10.200.200.0/30 masquerade"
     return f"""table ip {TABLE} {{
  chain postrouting {{
   type nat hook postrouting priority srcnat; policy accept;
-  oifname \"{transport}\" ip saddr 10.200.200.0/30 masquerade
+  {nat_rule}
  }}
 }}
 table inet {TABLE} {{
  chain forward {{
   type filter hook forward priority filter; policy accept;
-  iifname \"{HOST_IF}\" oifname \"{transport}\" accept
+  {forward_rule}
   iifname \"{HOST_IF}\" drop
   iifname \"{transport}\" oifname \"{HOST_IF}\" ct state established,related accept
  }}
@@ -374,22 +448,38 @@ def mark_owned(r: Runner) -> None:
         write_runtime_file(OWNERSHIP, "agy-net\n")
 
 
-def start(r: Runner, config: Path, transport: str, dns_override: list[str] | None = None) -> None:
+def start(
+    r: Runner,
+    config: Path,
+    transport: str,
+    tunnel_mode: str,
+    dns_override: list[str] | None = None,
+) -> None:
     if not r.dry_run:
         require_tools("ip", "nft")
-    if dns_override is None:
+        if tunnel_mode == TUNNEL_MODE_AWG:
+            require_tools("awg-quick")
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        if dns_override is not None:
+            raise AgyError("--dns is only for reuse mode; AWG DNS comes from awg0.conf")
+        endpoint, port = validate_conf(config)
+        dns_mode, dns_defaults, dns_routes = dns_settings(config)
+    elif dns_override is None:
+        endpoint = port = None
         validate_conf(config)
         dns_mode, dns_defaults, dns_routes = dns_settings(config)
     else:
+        endpoint = port = None
         dns_mode, dns_defaults, dns_routes = "vpn", dns_override, {}
     if not iface_exists(r, transport):
         raise AgyError(f"transport interface {transport} is not up; refusing to touch any tunnel")
     require_forwarding(r)
     if ns_exists(r):
         active_transport = recorded_transport()
-        if active_transport != transport:
-            raise AgyError(f"{NS} is already running over {active_transport}; stop it before selecting {transport}")
-        print(f"{NS} is already running over {transport}")
+        active_mode = recorded_tunnel_mode()
+        if active_transport != transport or active_mode != tunnel_mode:
+            raise AgyError(f"{NS} is already running over {active_transport} in {active_mode} mode; stop it before changing transport or mode")
+        print(f"{NS} is already running over {transport} in {tunnel_mode} mode")
         return
     ensure_tables_free(r)
     try:
@@ -402,16 +492,19 @@ def start(r: Runner, config: Path, transport: str, dns_override: list[str] | Non
         r.run(["ip", "netns", "exec", NS, "ip", "addr", "add", NET_CIDR, "dev", NET_IF])
         r.run(["ip", "netns", "exec", NS, "ip", "link", "set", NET_IF, "up"])
         r.run(["ip", "netns", "exec", NS, "ip", "route", "replace", "default", "via", HOST_IP, "dev", NET_IF])
-        # Reuse the already-running transport. No VPN client, AWG peer, or VLESS client is created here.
-        apply_nft(r, ["nft", "-f", "-"], host_nft_script(transport), "host NAT rules")
+        # The host transport is only reused for bootstrap; managed AWG stays inside the namespace.
+        apply_nft(r, ["nft", "-f", "-"], host_nft_script(transport, endpoint, port), "host NAT rules")
         mark_owned(r)
         if not r.dry_run:
             write_runtime_file(TRANSPORT_FILE, transport + "\n")
+            write_runtime_file(MODE_FILE, tunnel_mode + "\n")
+        if tunnel_mode == TUNNEL_MODE_AWG:
+            start_awg(r, config)
         if r.dry_run:
             print("PLAN write /run/agy-net/resolv.conf from config DNS (mode 0644)")
         else:
             write_resolv_conf(dns_mode, dns_defaults)
-        apply_nft(r, ["ip", "netns", "exec", NS, "nft", "-f", "-"], nft_script(), "namespace kill-switch rules")
+        apply_nft(r, ["ip", "netns", "exec", NS, "nft", "-f", "-"], nft_script(endpoint, port), "namespace kill-switch rules")
         if dns_mode == "split":
             if r.dry_run:
                 print("PLAN start dnsmasq only inside agy-net on 127.0.0.53")
@@ -428,6 +521,7 @@ def start(r: Runner, config: Path, transport: str, dns_override: list[str] | Non
 def stop(r: Runner, quiet: bool = False) -> None:
     if not r.dry_run:
         stop_dnsmasq()
+    stop_awg(r)
     if ns_exists(r):
         r.run(["ip", "netns", "delete", NS], check=False)
     if iface_exists(r, HOST_IF):
@@ -438,22 +532,34 @@ def stop(r: Runner, quiet: bool = False) -> None:
         if not r.dry_run:
             OWNERSHIP.unlink(missing_ok=True)
             TRANSPORT_FILE.unlink(missing_ok=True)
+            MODE_FILE.unlink(missing_ok=True)
             RESOLV_CONF.unlink(missing_ok=True)
+            AWG_RUNTIME_CONF.unlink(missing_ok=True)
     if not quiet:
         if not r.dry_run:
             log_event("stopped namespace=agy-net")
         print("agy-net stopped; namespace and agy-net nft table removed")
 
 
-def status(r: Runner, transport: str) -> int:
+def status(r: Runner, transport: str, tunnel_mode: str) -> int:
     if not ns_exists(r):
         print("[FAIL] namespace agy-net is absent\nRun: sudo agy-net start")
         return 1
+    bad = False
     print("[OK] namespace agy-net")
     for name in (NET_IF,):
-        print(("[OK] " if iface_exists(r, name, NS) else "[FAIL] ") + name)
-    print(("[OK] " if iface_exists(r, transport) else "[FAIL] ") + f"host transport {transport}")
-    return 0
+        present = iface_exists(r, name, NS)
+        bad |= not present
+        print(("[OK] " if present else "[FAIL] ") + name)
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        present = iface_exists(r, AWG_IF, NS)
+        bad |= not present
+        print(("[OK] " if present else "[FAIL] ") + f"{AWG_IF} (managed AWG)")
+    present = iface_exists(r, transport)
+    bad |= not present
+    print(("[OK] " if present else "[FAIL] ") + f"host transport {transport}")
+    print(f"[OK] tunnel mode {tunnel_mode}")
+    return 1 if bad else 0
 
 
 def invoking_user() -> pwd.struct_passwd:
@@ -541,16 +647,25 @@ def run_in_namespace(r: Runner, command: list[str]) -> int:
     return subprocess.run(["ip", "netns", "exec", NS, executable, "_exec", "--user", account.pw_name, *resolved]).returncode
 
 
-def test_killswitch(r: Runner) -> int:
+def test_killswitch(r: Runner, tunnel_mode: str) -> int:
     if not ns_exists(r) or not iface_exists(r, NET_IF, NS):
         raise AgyError("start agy-net before test-killswitch")
+    if tunnel_mode == TUNNEL_MODE_AWG and not iface_exists(r, AWG_IF, NS):
+        raise AgyError("managed AWG interface is absent; restart agy-net")
     print("Testing VPN connectivity...")
     before = run_in_namespace(r, ["curl", "--fail", "--silent", "--show-error", "--max-time", "12", CHECK_URL])
-    r.run(["ip", "netns", "exec", NS, "ip", "route", "del", "default"])
-    try:
-        blocked = run_in_namespace(r, ["curl", "--fail", "--silent", "--show-error", "--max-time", "5", CHECK_URL]) != 0
-    finally:
-        r.run(["ip", "netns", "exec", NS, "ip", "route", "replace", "default", "via", HOST_IP, "dev", NET_IF])
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        r.run(["ip", "netns", "exec", NS, "ip", "link", "set", "dev", AWG_IF, "down"])
+        try:
+            blocked = run_in_namespace(r, ["curl", "--fail", "--silent", "--show-error", "--max-time", "5", CHECK_URL]) != 0
+        finally:
+            r.run(["ip", "netns", "exec", NS, "ip", "link", "set", "dev", AWG_IF, "up"])
+    else:
+        r.run(["ip", "netns", "exec", NS, "ip", "route", "del", "default"])
+        try:
+            blocked = run_in_namespace(r, ["curl", "--fail", "--silent", "--show-error", "--max-time", "5", CHECK_URL]) != 0
+        finally:
+            r.run(["ip", "netns", "exec", NS, "ip", "route", "replace", "default", "via", HOST_IP, "dev", NET_IF])
     if before == 0 and blocked:
         print("[OK] namespace egress is blocked when its only route is removed")
         return 0
@@ -558,11 +673,20 @@ def test_killswitch(r: Runner) -> int:
     return 1
 
 
-def doctor(r: Runner, config: Path, transport: str, dns_override: list[str] | None = None) -> int:
+def doctor(
+    r: Runner,
+    config: Path,
+    transport: str,
+    tunnel_mode: str,
+    dns_override: list[str] | None = None,
+) -> int:
     bad = False
     for tool in ("ip", "nft", "curl", "systemctl"):
         available = bool(shutil.which(tool)); bad |= not available
         print(f"[{'OK' if available else 'FAIL'}] {tool}" + ("" if available else " — install required package"))
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        available = bool(shutil.which("awg-quick")); bad |= not available
+        print(f"[{'OK' if available else 'FAIL'}] awg-quick" + ("" if available else " — install AmneziaWG tools"))
     if dns_override is None:
         try:
             validate_conf(config); print("[OK] AmneziaWG config permissions and shape (not applied to host)")
@@ -582,7 +706,7 @@ def doctor(r: Runner, config: Path, transport: str, dns_override: list[str] | No
         print("[OK] IPv4 forwarding")
     else:
         bad = True; print("[FAIL] IPv4 forwarding — enable net.ipv4.ip_forward=1")
-    bad |= status(r, transport) != 0
+    bad |= status(r, transport, tunnel_mode) != 0
     return 1 if bad else 0
 
 
@@ -600,8 +724,26 @@ def dns_test(r: Runner, hostname: str) -> int:
     return run_in_namespace(r, ["getent", "ahostsv4", hostname])
 
 
-def transport_status(transport: str) -> int:
+def transport_status(transport: str, tunnel_mode: str) -> int:
     require_root()
+    if tunnel_mode == TUNNEL_MODE_AWG:
+        if not iface_exists(Runner(), AWG_IF, NS):
+            raise AgyError(f"managed {AWG_IF} interface is not up")
+        result = subprocess.run(
+            ["ip", "netns", "exec", NS, "awg", "show", AWG_IF, "latest-handshakes"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode:
+            raise AgyError("could not read managed AWG handshake state")
+        match = re.search(r"\s(\d+)\s*$", result.stdout)
+        if not match or match.group(1) == "0":
+            print("[WARN] managed AWG has no completed handshake yet")
+            return 1
+        age = max(0, int(time.time()) - int(match.group(1)))
+        print(f"[OK] managed AWG latest handshake: {age} sec ago")
+        return 0
     if not iface_exists(Runner(), transport):
         raise AgyError(f"transport interface {transport} is not up")
     return subprocess.run(["ip", "-details", "link", "show", "dev", transport]).returncode
@@ -768,6 +910,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=CONF)
     parser.add_argument("--profile", help="configuration profile name under /etc/agy-net/profiles")
     parser.add_argument("--transport-interface", default=os.environ.get("AGY_NET_TRANSPORT_INTERFACE"), metavar="IFACE", help="existing VPN/TUN interface (default: amn0)")
+    parser.add_argument("--tunnel-mode", default=os.environ.get("AGY_NET_TUNNEL_MODE"), choices=(TUNNEL_MODE_REUSE, TUNNEL_MODE_AWG), help="reuse an existing TUN, or create private awg0 inside agy-net")
     parser.add_argument("--dns", default=os.environ.get("AGY_NET_DNS"), metavar="IP[,IP]", help="namespace DNS override; required for VLESS without an AWG config")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -789,11 +932,12 @@ def main() -> int:
     try:
         config = profile_config(args.profile, args.config)
         transport = selected_transport(r, args.transport_interface)
+        tunnel_mode = selected_tunnel_mode(r, args.tunnel_mode)
         dns_override = parse_dns_override(args.dns) if args.action in {"start", "restart", "doctor"} else None
         if args.action == "start":
             if not args.dry_run:
                 require_root()
-            start(r, config, transport, dns_override)
+            start(r, config, transport, tunnel_mode, dns_override)
         elif args.action == "stop":
             if not args.dry_run:
                 require_root()
@@ -801,15 +945,15 @@ def main() -> int:
         elif args.action == "restart":
             if not args.dry_run:
                 require_root()
-            stop(r, quiet=True); start(r, config, transport, dns_override)
-        elif args.action == "status": return status(r, transport)
-        elif args.action == "doctor": return doctor(r, config, transport, dns_override)
+            stop(r, quiet=True); start(r, config, transport, tunnel_mode, dns_override)
+        elif args.action == "status": return status(r, transport, tunnel_mode)
+        elif args.action == "doctor": return doctor(r, config, transport, tunnel_mode, dns_override)
         elif args.action == "run": return run_in_namespace(r, args.command)
         elif args.action == "shell": return run_in_namespace(r, ["/bin/bash"])
         elif args.action == "_exec": return execute_in_namespace(args.user, args.command)
         elif args.action == "ip": return namespace_ip(args.arguments)
         elif args.action == "dns-test": return dns_test(r, args.hostname)
-        elif args.action == "wg-status": return transport_status(transport)
+        elif args.action == "wg-status": return transport_status(transport, tunnel_mode)
         elif args.action == "test": return connectivity_test(r)
         elif args.action == "logs": return show_logs()
         elif args.action == "configure": safe_copy_config(args.source, config, args.dry_run)
@@ -823,7 +967,7 @@ def main() -> int:
         elif args.action == "test-killswitch":
             if not args.dry_run:
                 require_root()
-            return test_killswitch(r)
+            return test_killswitch(r, tunnel_mode)
         return 0
     except AgyError as exc:
         print(f"error: {exc}", file=sys.stderr); return 2

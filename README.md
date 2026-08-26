@@ -5,7 +5,7 @@
 <h1 align="center">Обход региональных ограничений Antigravity</h1>
 
 <p align="center">
-  <strong>Изолированный запуск Antigravity через уже подключённый AmneziaVPN или VLESS TUN.</strong><br>
+  <strong>Изолированный запуск Antigravity через отдельный AmneziaWG, уже подключённый AmneziaVPN или VLESS TUN.</strong><br>
   Linux • systemd • network namespace • kill switch
 </p>
 
@@ -14,12 +14,13 @@
 
 `agy-net` помогает запускать Antigravity в России через уже работающий VPN-транспорт, не меняя сеть всего компьютера. Приложение и все его дочерние процессы получают отдельный Linux network namespace; их трафик разрешён только через выбранный интерфейс. Поддерживаются:
 
-- активный AmneziaVPN-интерфейс `amn0` — режим по умолчанию;
+- отдельный AmneziaWG-интерфейс `awg0` только внутри `agy-net`;
+- активный AmneziaVPN-интерфейс `amn0` в режиме повторного использования;
 - уже подключённый VLESS-клиент в режиме **TUN**, например с интерфейсом `tun0` или `vless0`;
 - отдельный DNS внутри namespace, включая split DNS;
 - ярлык для рабочего стола и панели.
 
-Проект **не** запускает и не настраивает AmneziaWG, Xray, V2Ray или sing-box, не читает VLESS-ссылки и не меняет маршруты хоста, Wi-Fi либо другие VPN-интерфейсы. Если выбранный транспорт пропадает, трафик из namespace блокируется и не переходит на другую сеть.
+Проект не меняет существующие VPN/TUN-интерфейсы, маршруты хоста, Wi-Fi, Xray, V2Ray или sing-box и не читает VLESS-ссылки. Режим `awg` создаёт новый `awg0` только внутри `agy-net`: действующий `amn0` нужен лишь для зашифрованного handshake с числовым endpoint’ом. Если любой выбранный транспорт пропадает, трафик из namespace блокируется и не переходит на другую сеть.
 
 ## Как это работает
 
@@ -30,14 +31,13 @@ Antigravity и дочерние процессы (обычный пользов�
             namespace agy-net
                     │ veth
                     ▼
-        выбранный интерфейс amn0 / tun0 / vless0
-                    │
-                    └──────────► уже подключённый VPN или VLESS-клиент
+        режим reuse: amn0 / tun0 / vless0 ──► уже подключённый транспорт
+        режим awg: awg0 ──► veth ──► amn0 (только UDP handshake)
 
 Любой другой выход из agy-net ──► DROP
 ```
 
-`agy-net` создаёт только namespace `agy-net`, veth-пару `agy-host0`/`agy-net0` и собственные nftables-таблицы `agy_net`. DNS монтируется приватно для Antigravity; `/etc/resolv.conf` хоста не изменяется. При запуске приложение остаётся обычным пользовательским процессом — root используется только для создания изоляции.
+`agy-net` создаёт только namespace `agy-net`, veth-пару `agy-host0`/`agy-net0`, собственные nftables-таблицы `agy_net` и, только в режиме `awg`, интерфейс `awg0` внутри namespace. DNS монтируется приватно для Antigravity; `/etc/resolv.conf` хоста не изменяется. При запуске приложение остаётся обычным пользовательским процессом — root используется только для создания изоляции.
 
 ## Требования
 
@@ -45,8 +45,8 @@ Antigravity и дочерние процессы (обычный пользов�
 | --- | --- |
 | ОС | Ubuntu 22.04+, Debian 12+ или Linux Mint на их основе |
 | Инициализация | systemd и права `sudo` |
-| Пакеты | `iproute2`, `nftables`, `curl`, Python 3 |
-| Транспорт | активный `amn0`, либо VLESS-клиент с TUN-интерфейсом |
+| Пакеты | `iproute2`, `nftables`, `curl`, Python 3; для режима `awg` — `amneziawg-tools` |
+| Транспорт | отдельный AWG-конфиг и активный `amn0` для bootstrap, либо активный `amn0`/VLESS TUN в режиме reuse |
 | Сеть | включённый `net.ipv4.ip_forward=1` |
 | Split DNS | `dnsmasq` — только при использовании split DNS |
 
@@ -59,7 +59,7 @@ sudo install -Dm 0644 sysctl/90-agy-net.conf.example /etc/sysctl.d/90-agy-net.co
 sudo sysctl --system
 ```
 
-## Быстрый старт: AmneziaVPN
+## Быстрый старт: отдельный AmneziaWG внутри namespace
 
 ```sh
 git clone https://github.com/DirtyPills/AntigravityWelcomToRussia.git
@@ -73,13 +73,16 @@ chmod 600 ./awg0.conf
 # Заполните awg0.conf своими данными. Не добавляйте его в Git.
 
 sudo agy-net configure ./awg0.conf
-sudo agy-net doctor
-sudo agy-net start
+sudo install -Dm 0644 systemd/agy-net-awg.conf.example \
+  /etc/systemd/system/agy-net.service.d/awg.conf
+sudo systemctl daemon-reload
+sudo systemctl start agy-net.service
+sudo env AGY_NET_TUNNEL_MODE=awg agy-net doctor
 ```
 
-`configure` безопасно копирует конфигурацию в `/etc/agy-net/awg0.conf` с правами `0600`. Из неё используются DNS и проверка формы файла; ключи AWG и параметры подключения **не применяются** к `amn0` и не попадают в журналы.
+`configure` безопасно копирует конфигурацию в `/etc/agy-net/awg0.conf` с правами `0600`. В режиме `awg` копия без строки `DNS` временно создаётся в `/run/agy-net` с правами `0600` и передаётся `awg-quick` только внутри namespace. DNS подключается отдельно и приватно для Antigravity; ключи и параметры конфигурации не попадают в журналы. Через veth разрешён только UDP к числовому endpoint’у из конфига, поэтому при отключённом `awg0` выхода через `amn0` нет.
 
-### Повторное использование `amn0` без копирования AWG-конфига
+### Повторное использование `amn0` без отдельного AWG-конфига
 
 Если `amn0` уже подключён, но переносить его AWG-конфиг на компьютер не требуется или небезопасно, задайте только публичные DNS-серверы через systemd drop-in:
 
@@ -164,7 +167,8 @@ sudo agy-net status                 # состояние namespace и транс
 sudo agy-net doctor                 # зависимости и конфигурация
 sudo agy-net dns-test api.ipify.org # DNS внутри namespace
 sudo agy-net test                   # проверка HTTPS из namespace
-sudo agy-net test-killswitch        # временно убирает default route только в namespace
+sudo agy-net test-killswitch        # временно отключает awg0 либо default route только в namespace
+sudo agy-net wg-status              # handshake управляемого awg0 в режиме awg
 sudo agy-net logs                   # журнал с редактированием секретов
 sudo agy-net stop                   # удаляет только agy-net и его nftables-таблицы
 ```
