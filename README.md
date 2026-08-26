@@ -70,6 +70,19 @@ sudo agy-net start
 
 `configure` безопасно копирует конфигурацию в `/etc/agy-net/awg0.conf` с правами `0600`. Из неё используются DNS и проверка формы файла; ключи AWG и параметры подключения **не применяются** к `amn0` и не попадают в журналы.
 
+### Повторное использование `amn0` без копирования AWG-конфига
+
+Если `amn0` уже подключён, но переносить его AWG-конфиг на компьютер не требуется или небезопасно, задайте только публичные DNS-серверы через systemd drop-in:
+
+```sh
+sudo install -Dm 0644 systemd/agy-net-amnezia-dns.conf.example \
+  /etc/systemd/system/agy-net.service.d/dns.conf
+sudo systemctl daemon-reload
+sudo systemctl start agy-net.service
+```
+
+Этот вариант не читает и не создаёт AWG-конфиг, использует существующий `amn0` и задаёт DNS только для namespace `agy-net`.
+
 ## Запуск через VLESS TUN
 
 Поддерживается только уже подключённый VLESS-клиент, который создал обычный сетевой интерфейс TUN. Режимы с одним SOCKS5/HTTP-портом не подходят: namespace нужен L3-интерфейс, например `tun0`.
